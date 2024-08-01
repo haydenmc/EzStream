@@ -72,13 +72,14 @@ func main() {
 	slog.Info("Parsing flags...")
 	channelsJsonFilePath := flag.String("channelsJsonFile", "channels.json",
 		"Path to channels configuration JSON file")
-	slog.Info("Path to channels configuration JSON file", "path", *channelsJsonFilePath)
 	httpListenAddress := flag.String("httpListenAddress", ":8080",
 		"Network address to listen for HTTP requests on.")
-	slog.Info("HTTP listen address", "address", *httpListenAddress)
 	minUdpPort := flag.Uint("minUdp", 20000, "Minimum UDP port for assigning WebRTC connections")
 	maxUdpPort := flag.Uint("maxUdp", 21000, "Maximum UDP port for assigning WebRTC connections")
 	flag.Parse()
+	slog.Info("Configuration JSON file", "path", *channelsJsonFilePath)
+	slog.Info("HTTP listen address", "address", *httpListenAddress)
+	slog.Info("UDP port range", "min", *minUdpPort, "max", *maxUdpPort)
 
 	settingsEngine := webrtc.SettingEngine{}
 	settingsEngine.SetEphemeralUDPPortRange(uint16(*minUdpPort), uint16(*maxUdpPort))
