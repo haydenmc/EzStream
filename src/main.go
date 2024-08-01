@@ -94,7 +94,8 @@ func main() {
 			}
 		})
 	}
-	//settingsEngine.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	// Filter to IPv4 only for now.
+	settingsEngine.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
 	webRtcApi = webrtc.NewAPI(webrtc.WithSettingEngine(settingsEngine))
 
 	// Load JSON file
