@@ -1,10 +1,15 @@
 package main
 
 import (
+	_ "embed"
+	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"regexp"
 	"strconv"
 	"sync"
 	"text/template"
@@ -14,9 +19,22 @@ import (
 
 var (
 	// HTTP/HTML
-	indexTemplate = template.Must(template.ParseFiles("index.html.tmpl"))
+	//go:embed wwwroot/index.html.tmpl
+	indexFileContents string
+	indexTemplate     = template.Must(template.New("index").Parse(indexFileContents))
+	//go:embed wwwroot/watch.html.tmpl
+	watchFileContents string
+	watchTemplate     = template.Must(template.New("watch").Parse(watchFileContents))
+	//go:embed wwwroot/style.css
+	styleFileContents string
+	//go:embed wwwroot/Inter.var.woff2
+	fontFileContents []byte
+
+	// Channels
+	channels []ChannelInfo
 
 	// WebRTC
+	webRtcApi                          *webrtc.API
 	webRtcDataLock                     sync.RWMutex
 	ingestInfo                         map[string]*IngestInfo
 	uniquePeerConnectionId             uint64
@@ -29,6 +47,12 @@ var (
 	}
 )
 
+type ChannelInfo struct {
+	Id      string
+	Name    string
+	AuthKey string
+}
+
 type IngestInfo struct {
 	streamerPeerConnection *webrtc.PeerConnection
 	// trackLocals are the local tracks that map incoming stream ingest media
@@ -40,25 +64,145 @@ type IngestInfo struct {
 func main() {
 	slog.Info("Hello!")
 
+	// Init globals
 	ingestInfo = map[string]*IngestInfo{}
 	uniquePeerConnectionId = 1
 
+	// Parse flags
+	slog.Info("Parsing flags...")
+	channelsJsonFilePath := flag.String("channelsJsonFile", "channels.json",
+		"Path to channels configuration JSON file")
+	slog.Info("Path to channels configuration JSON file", "path", *channelsJsonFilePath)
+	httpListenAddress := flag.String("httpListenAddress", ":8080",
+		"Network address to listen for HTTP requests on.")
+	slog.Info("HTTP listen address", "address", *httpListenAddress)
+	minUdpPort := flag.Uint("minUdp", 20000, "Minimum UDP port for assigning WebRTC connections")
+	maxUdpPort := flag.Uint("maxUdp", 21000, "Maximum UDP port for assigning WebRTC connections")
+	flag.Parse()
+
+	settingsEngine := webrtc.SettingEngine{}
+	settingsEngine.SetEphemeralUDPPortRange(uint16(*minUdpPort), uint16(*maxUdpPort))
+	webRtcApi = webrtc.NewAPI(webrtc.WithSettingEngine(settingsEngine))
+
+	// Load JSON file
+	content, err := os.ReadFile(*channelsJsonFilePath)
+	if err != nil {
+		slog.Error("Could not open streams JSON file", "file", channelsJsonFilePath)
+		panic(err)
+	}
+	err = json.Unmarshal(content, &channels)
+	if err != nil {
+		slog.Error("Could not parse JSON data")
+		panic(err)
+	}
+	for _, c := range channels {
+		slog.Info("Channel registered", "id", c.Id, "name", c.Name)
+	}
+
+	// Start HTTP server
+	// Static files
+	// TODO
+	// HTML/front-end endpoints
 	http.HandleFunc("/", handleIndex)
+	http.HandleFunc("/watch/{channelId}", handleWatch)
+	// Serve some files straight from memory
+	http.HandleFunc("/style.css", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, styleFileContents)
+	})
+	http.HandleFunc("/Inter.var.woff2", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "font/woff2")
+		w.WriteHeader(http.StatusOK)
+		w.Write(fontFileContents)
+	})
+	// WHIP+WHEP endpoints
 	http.HandleFunc("/ingest", handleIngestStart)
 	http.HandleFunc("/ingest/{channelId}", handleIngestStop)
 	http.HandleFunc("/whep/{channelId}", handleViewerStart)
 	http.HandleFunc("/whep/{channelId}/{connectionId}", handleViewerStop)
 	slog.Info("Starting HTTP server...")
-	http.ListenAndServe(":8080", nil)
+	http.ListenAndServe(*httpListenAddress, nil)
 }
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
-	indexTemplate.Execute(w, nil)
+	if r.URL.Path != "/" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	type ChannelData struct {
+		Id     string
+		IsLive bool
+		Name   string
+	}
+	data := make([]ChannelData, len(channels))
+	webRtcDataLock.Lock()
+	defer webRtcDataLock.Unlock()
+	for i, c := range channels {
+		_, isLive := ingestInfo[c.Id]
+		data[i].Id = c.Id
+		data[i].IsLive = isLive
+		data[i].Name = c.Name
+	}
+	indexTemplate.Execute(w, data)
+}
+
+func handleWatch(w http.ResponseWriter, r *http.Request) {
+	channelId := r.PathValue("channelId")
+	channelFound := false
+	var channel ChannelInfo
+	for _, c := range channels {
+		if c.Id == channelId {
+			channel = c
+			channelFound = true
+			break
+		}
+	}
+	if !channelFound {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	webRtcDataLock.Lock()
+	defer webRtcDataLock.Unlock()
+	type WatchData struct {
+		Id     string
+		IsLive bool
+		Name   string
+	}
+	_, isLive := ingestInfo[channelId]
+	data := WatchData{}
+	data.Id = channelId
+	data.IsLive = isLive
+	data.Name = channel.Name
+	watchTemplate.Execute(w, data)
 }
 
 func handleIngestStart(w http.ResponseWriter, r *http.Request) {
-	// TODO - eventually we'll pull this out of an authorization header
-	channelId := "1"
+	// Authenticate and determine the channel ID
+	authRegex := regexp.MustCompile(`Bearer (\S+)`)
+	authHeader := r.Header.Get("Authorization")
+	authMatches := authRegex.FindStringSubmatch(authHeader)
+	if len(authMatches) != 2 {
+		slog.Error("Invalid authorization header")
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	channelFound := false
+	channelId := ""
+	for _, c := range channels {
+		if c.AuthKey == authMatches[1] {
+			channelFound = true
+			channelId = c.Id
+			break
+		}
+	}
+	if !channelFound {
+		slog.Error("Authorization header does not match any known channels")
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	slog.Info("Received authenticated ingest request", "channel", channelId)
 
 	// Read the offer from HTTP Request
 	offer, err := io.ReadAll(r.Body)
@@ -67,11 +211,14 @@ func handleIngestStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	peerConnection, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	peerConnection, err := webRtcApi.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		slog.Error("Ingest: Could not create new peer connection", "error", err)
 		return
 	}
+
+	webRtcDataLock.Lock()
+	defer webRtcDataLock.Unlock()
 
 	ingestInfo[channelId] = &IngestInfo{
 		streamerPeerConnection: peerConnection,
@@ -181,7 +328,7 @@ func handleViewerStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create a new RTCPeerConnection
-	peerConnection, err := webrtc.NewPeerConnection(defaultPeerConnectionConfiguration)
+	peerConnection, err := webRtcApi.NewPeerConnection(defaultPeerConnectionConfiguration)
 	if err != nil {
 		panic(err)
 	}

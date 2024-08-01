@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WarmItUp.tv</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <ul class="stream-list">
+      {{range $index, $channel := .}}
+      <li
+        class="{{if $channel.IsLive}}live{{else}}offline{{end}}"
+        style="--animation-order: {{$index}};">
+        <a href="/watch/{{$channel.Id}}">
+          <div class="preview placeholder">
+            <span>{{if $channel.IsLive}}...{{else}}OFFLINE{{end}}</span>
+          </div>
+          <div class="channel-name">{{$channel.Name}}</div>
+        </a>
+      </li>
+      {{end}}
+    </ul>
+  </main>
+</body>
+</html>

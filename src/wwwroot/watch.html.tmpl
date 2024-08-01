@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>{{.Name}}</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    {{if .IsLive}}
+    <video autoplay controls>
+    </video>
+    <script>
+      let peerConnection = new RTCPeerConnection()
+      window.addEventListener("load", () => {
+        peerConnection.addTransceiver('video', { direction: 'recvonly' })
+        peerConnection.addTransceiver('audio', { direction: 'recvonly' })
+        let inboundStream = null;
+        peerConnection.ontrack = (event) => {
+          if (!inboundStream) {
+            inboundStream = new MediaStream();
+            document.querySelector('video').srcObject = inboundStream;
+          }
+          inboundStream.addTrack(event.track);
+        }
+
+        peerConnection.createOffer().then(offer => {
+          peerConnection.setLocalDescription(offer)
+
+          fetch(`/whep/{{.Id}}`, {
+            method: 'POST',
+            body: offer.sdp,
+            headers: {
+              Authorization: `Bearer none`,
+              'Content-Type': 'application/sdp'
+            }
+          }).then(r => r.text())
+            .then(answer => {
+              peerConnection.setRemoteDescription({
+                sdp: answer,
+                type: 'answer'
+              })
+            })
+        })
+      })
+    </script>
+    {{else}}
+    <h1>This stream is not active.</h1>
+    {{end}}
+  </main>
+</body>
+</html>

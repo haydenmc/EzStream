@@ -1,0 +1,12 @@
+[
+    {
+        "id": "hello",
+        "name": "My First Stream!",
+        "authKey": "secretkeygoeshere"
+    },
+    {
+        "id": "world",
+        "name": "My Second Stream!",
+        "authKey": "anothersecretkeygoeshere"
+    }
+]
