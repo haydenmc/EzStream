@@ -94,7 +94,7 @@ func main() {
 			}
 		})
 	}
-	settingsEngine.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	//settingsEngine.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
 	webRtcApi = webrtc.NewAPI(webrtc.WithSettingEngine(settingsEngine))
 
 	// Load JSON file
@@ -224,7 +224,7 @@ func handleIngestStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	peerConnection, err := webRtcApi.NewPeerConnection(webrtc.Configuration{})
+	peerConnection, err := webRtcApi.NewPeerConnection(defaultPeerConnectionConfiguration)
 	if err != nil {
 		slog.Error("Ingest: Could not create new peer connection", "error", err)
 		return
