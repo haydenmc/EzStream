@@ -76,13 +76,25 @@ func main() {
 		"Network address to listen for HTTP requests on.")
 	minUdpPort := flag.Uint("minUdp", 20000, "Minimum UDP port for assigning WebRTC connections")
 	maxUdpPort := flag.Uint("maxUdp", 21000, "Maximum UDP port for assigning WebRTC connections")
+	networkInterface := flag.String("networkInterface", "", "Network interface to filter to")
 	flag.Parse()
 	slog.Info("Configuration JSON file", "path", *channelsJsonFilePath)
 	slog.Info("HTTP listen address", "address", *httpListenAddress)
 	slog.Info("UDP port range", "min", *minUdpPort, "max", *maxUdpPort)
+	slog.Info("Network Interface", "interface", *networkInterface)
 
 	settingsEngine := webrtc.SettingEngine{}
 	settingsEngine.SetEphemeralUDPPortRange(uint16(*minUdpPort), uint16(*maxUdpPort))
+	if *networkInterface != "" {
+		settingsEngine.SetInterfaceFilter(func(s string) bool {
+			if s == *networkInterface {
+				return true
+			} else {
+				return false
+			}
+		})
+	}
+	settingsEngine.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
 	webRtcApi = webrtc.NewAPI(webrtc.WithSettingEngine(settingsEngine))
 
 	// Load JSON file
