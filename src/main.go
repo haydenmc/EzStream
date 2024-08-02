@@ -263,8 +263,6 @@ func handleIngestStart(w http.ResponseWriter, r *http.Request) {
 	peerConnection.OnTrack(func(t *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		// Create a track to fan out our incoming video to all peers
 		trackLocal := addIngestTrack(channelId, t)
-		defer removeIngestTrack(channelId, trackLocal)
-
 		buf := make([]byte, 1500)
 		for {
 			i, _, err := t.Read(buf)
@@ -326,13 +324,13 @@ func handleViewerStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	webRtcDataLock.Lock()
+	defer webRtcDataLock.Unlock()
 	channelId := r.PathValue("channelId")
 	if _, ok := ingestInfo[channelId]; !ok {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	webRtcDataLock.Lock()
-	defer webRtcDataLock.Unlock()
 	streamInfo := ingestInfo[channelId]
 
 	// Read the offer from HTTP Request
@@ -391,6 +389,7 @@ func handleViewerStart(w http.ResponseWriter, r *http.Request) {
 				"uniqueId", uniqueId)
 			webRtcDataLock.Lock()
 			defer webRtcDataLock.Unlock()
+			// If the channel stream still exists remove this connection from it
 			if info, ok := ingestInfo[channelId]; ok {
 				delete(info.viewerPeerConnections, uniqueId)
 			}
@@ -493,6 +492,13 @@ func onIngestPeerConnectionClosed(channelId string) {
 	webRtcDataLock.Lock()
 	defer webRtcDataLock.Unlock()
 
+	// Close all viewer connections
+	slog.Info("Ingest: Closing viewer connections", "channelId", channelId,
+		"numViewerConnections", len(ingestInfo[channelId].viewerPeerConnections))
+	for _, c := range ingestInfo[channelId].viewerPeerConnections {
+		c.Close()
+	}
+
 	delete(ingestInfo, channelId)
 }
 
@@ -510,25 +516,10 @@ func addIngestTrack(channelId string, t *webrtc.TrackRemote) *webrtc.TrackLocalS
 	slog.Info("Ingest: Track added", "channel", channelId, "trackId", t.ID())
 
 	// Update all viewers with new track
-	for _, p := range ingestInfo[channelId].viewerPeerConnections {
-		p.AddTrack(trackLocal)
+	if len(ingestInfo[channelId].viewerPeerConnections) > 0 {
+		slog.Warn("Ingest track added while viewers are already connected; "+
+			"existing viewers will not see the new track.", "channelId", channelId)
 	}
 
 	return trackLocal
-}
-
-func removeIngestTrack(channelId string, t *webrtc.TrackLocalStaticRTP) {
-	webRtcDataLock.Lock()
-	defer webRtcDataLock.Unlock()
-	for _, p := range ingestInfo[channelId].viewerPeerConnections {
-		senders := p.GetSenders()
-		for _, s := range senders {
-			if s.Track() == t {
-				p.RemoveTrack(s)
-				break
-			}
-		}
-	}
-	delete(ingestInfo[channelId].localTracks, t.ID())
-	slog.Info("Ingest: Track removed", "channel", channelId, "trackId", t.ID())
 }
