@@ -266,7 +266,7 @@ func findChannelInfoById(id string) (*ChannelInfo, error) {
 			return &c, nil
 		}
 	}
-	return nil, errors.New("Could not find channel with specified ID")
+	return nil, errors.New("could not find channel with specified ID")
 }
 
 func findChannelInfoByAuthKey(authKey string) (*ChannelInfo, error) {
@@ -275,7 +275,7 @@ func findChannelInfoByAuthKey(authKey string) (*ChannelInfo, error) {
 			return &c, nil
 		}
 	}
-	return nil, errors.New("Could not find channel with specified auth key")
+	return nil, errors.New("could not find channel with specified auth key")
 }
 
 func handleIngestStart(w http.ResponseWriter, r *http.Request) {
@@ -433,21 +433,10 @@ func handleViewerStart(w http.ResponseWriter, r *http.Request) {
 
 	// Add tracks
 	for _, t := range streamInfo.localTracks {
-		rtpSender, err := peerConnection.AddTrack(t)
+		_, err := peerConnection.AddTrack(t)
 		if err != nil {
 			panic(err)
 		}
-		// Read incoming RTCP packets
-		// Before these packets are returned they are processed by interceptors. For things
-		// like NACK this needs to be called.
-		go func() {
-			rtcpBuf := make([]byte, 1500)
-			for {
-				if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
-					return
-				}
-			}
-		}()
 	}
 
 	// Set the handler for ICE connection state
