@@ -44,7 +44,7 @@ var (
 		CheckOrigin: func(r *http.Request) bool {
 			return true
 		}}
-	nextUniqueWsId uint64                              = 0
+	nextUniqueWsId uint64                              = 1
 	wsChannels     map[uint64]chan ChannelNotification = map[uint64]chan ChannelNotification{}
 
 	// WebRTC
@@ -189,6 +189,8 @@ func handleWebsocket(w http.ResponseWriter, r *http.Request) {
 				return
 			} else if err != nil {
 				slog.Error("Websocket: Receive error", "wsId", uniqueId, "err", err)
+				close(receiveCh)
+				return
 			}
 		}
 	}()
