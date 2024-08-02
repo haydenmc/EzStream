@@ -3,6 +3,7 @@ package main
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,7 +15,12 @@ import (
 	"sync"
 	"text/template"
 
+	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
+)
+
+const (
+	wsProtocol = "stream-updates"
 )
 
 var (
@@ -33,11 +39,19 @@ var (
 	// Channels
 	channels []ChannelInfo
 
+	// Websocket
+	upgrader = websocket.Upgrader{Subprotocols: []string{wsProtocol},
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		}}
+	nextUniqueWsId uint64                              = 0
+	wsChannels     map[uint64]chan ChannelNotification = map[uint64]chan ChannelNotification{}
+
 	// WebRTC
 	webRtcApi                          *webrtc.API
 	webRtcDataLock                     sync.RWMutex
 	ingestInfo                         map[string]*IngestInfo
-	uniquePeerConnectionId             uint64
+	nextUniquePeerConnectionId         uint64
 	defaultPeerConnectionConfiguration = webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{
@@ -46,6 +60,12 @@ var (
 		},
 	}
 )
+
+type ChannelNotification struct {
+	Id     string
+	Name   string
+	IsLive bool
+}
 
 type ChannelInfo struct {
 	Id      string
@@ -66,7 +86,7 @@ func main() {
 
 	// Init globals
 	ingestInfo = map[string]*IngestInfo{}
-	uniquePeerConnectionId = 1
+	nextUniquePeerConnectionId = 1
 
 	// Parse flags
 	slog.Info("Parsing flags...")
@@ -113,12 +133,7 @@ func main() {
 		slog.Info("Channel registered", "id", c.Id, "name", c.Name)
 	}
 
-	// Start HTTP server
-	// Static files
-	// TODO
-	// HTML/front-end endpoints
-	http.HandleFunc("/", handleIndex)
-	http.HandleFunc("/watch/{channelId}", handleWatch)
+	// Set up HTTP endpoints
 	// Serve some files straight from memory
 	http.HandleFunc("/style.css", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
@@ -130,13 +145,66 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		w.Write(fontFileContents)
 	})
-	// WHIP+WHEP endpoints
+
+	// Templated HTML/front-end endpoints
+	http.HandleFunc("/", handleIndex)
+	http.HandleFunc("/watch/{channelId}", handleWatch)
+
+	// WHIP+WHEP WebRTC endpoints
 	http.HandleFunc("/ingest", handleIngestStart)
 	http.HandleFunc("/ingest/{channelId}", handleIngestStop)
 	http.HandleFunc("/whep/{channelId}", handleViewerStart)
 	http.HandleFunc("/whep/{channelId}/{connectionId}", handleViewerStop)
+
+	// Websocket API
+	http.HandleFunc("/ws", handleWebsocket)
+
 	slog.Info("Starting HTTP server...")
 	http.ListenAndServe(*httpListenAddress, nil)
+}
+
+func handleWebsocket(w http.ResponseWriter, r *http.Request) {
+	c, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		slog.Error("Websocket: Couldn't upgrade http connection", "err", err)
+		return
+	}
+	defer c.Close()
+	if c.Subprotocol() != wsProtocol {
+		slog.Error("Websocket: Invalid subprotocol", "subprotocol", c.Subprotocol(),
+			"expected", wsProtocol)
+		return
+	}
+	uniqueId := nextUniqueWsId
+	nextUniqueWsId += 1
+	receiveCh := make(chan ChannelNotification)
+	wsChannels[uniqueId] = receiveCh
+	defer delete(wsChannels, uniqueId)
+	go func() {
+		for {
+			_, _, err := c.ReadMessage()
+			if _, ok := err.(*websocket.CloseError); ok {
+				slog.Info("Websocket: Socket closed by client", "wsId", uniqueId)
+				close(receiveCh)
+				return
+			} else if err != nil {
+				slog.Error("Websocket: Receive error", "wsId", uniqueId, "err", err)
+			}
+		}
+	}()
+	slog.Info("Websocket: Socket opened", "wsId", uniqueId)
+	for {
+		channelUpdate, ok := <-receiveCh
+		if !ok {
+			slog.Info("Websocket: Channel closed", "wsId", uniqueId)
+			break
+		}
+		err = c.WriteJSON(channelUpdate)
+		if err != nil {
+			slog.Error("Websocket: Could not marshal JSON data", "err", err)
+			break
+		}
+	}
 }
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -192,6 +260,24 @@ func handleWatch(w http.ResponseWriter, r *http.Request) {
 	watchTemplate.Execute(w, data)
 }
 
+func findChannelInfoById(id string) (*ChannelInfo, error) {
+	for _, c := range channels {
+		if c.Id == id {
+			return &c, nil
+		}
+	}
+	return nil, errors.New("Could not find channel with specified ID")
+}
+
+func findChannelInfoByAuthKey(authKey string) (*ChannelInfo, error) {
+	for _, c := range channels {
+		if c.AuthKey == authKey {
+			return &c, nil
+		}
+	}
+	return nil, errors.New("Could not find channel with specified auth key")
+}
+
 func handleIngestStart(w http.ResponseWriter, r *http.Request) {
 	// Authenticate and determine the channel ID
 	authRegex := regexp.MustCompile(`Bearer (\S+)`)
@@ -202,21 +288,13 @@ func handleIngestStart(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	channelFound := false
-	channelId := ""
-	for _, c := range channels {
-		if c.AuthKey == authMatches[1] {
-			channelFound = true
-			channelId = c.Id
-			break
-		}
-	}
-	if !channelFound {
+	channelInfo, err := findChannelInfoByAuthKey(authMatches[1])
+	if err != nil {
 		slog.Error("Authorization header does not match any known channels")
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	slog.Info("Received authenticated ingest request", "channel", channelId)
+	slog.Info("Received authenticated ingest request", "channel", channelInfo.Id)
 
 	// Read the offer from HTTP Request
 	offer, err := io.ReadAll(r.Body)
@@ -234,7 +312,7 @@ func handleIngestStart(w http.ResponseWriter, r *http.Request) {
 	webRtcDataLock.Lock()
 	defer webRtcDataLock.Unlock()
 
-	ingestInfo[channelId] = &IngestInfo{
+	ingestInfo[channelInfo.Id] = &IngestInfo{
 		streamerPeerConnection: peerConnection,
 		localTracks:            map[string]*webrtc.TrackLocalStaticRTP{},
 		viewerPeerConnections:  map[uint64]*webrtc.PeerConnection{}}
@@ -255,14 +333,14 @@ func handleIngestStart(w http.ResponseWriter, r *http.Request) {
 				slog.Error("Ingest: Peer connection failure + close error", "error", err)
 			}
 		case webrtc.PeerConnectionStateClosed:
-			onIngestPeerConnectionClosed(channelId)
+			onIngestPeerConnectionClosed(channelInfo.Id)
 		default:
 		}
 	})
 
 	peerConnection.OnTrack(func(t *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		// Create a track to fan out our incoming video to all peers
-		trackLocal := addIngestTrack(channelId, t)
+		trackLocal := addIngestTrack(channelInfo.Id, t)
 		buf := make([]byte, 1500)
 		for {
 			i, _, err := t.Read(buf)
@@ -307,14 +385,19 @@ func handleIngestStart(w http.ResponseWriter, r *http.Request) {
 	<-gatherComplete
 
 	// WHIP+WHEP expects a Location header and a HTTP Status Code of 201
-	w.Header().Add("Location", "/ingest/"+channelId)
+	w.Header().Add("Location", "/ingest/"+channelInfo.Id)
 	w.WriteHeader(http.StatusCreated)
 
 	// Write Answer with Candidates as HTTP Response
 	if _, err = fmt.Fprint(w, peerConnection.LocalDescription().SDP); err != nil {
 		panic(err)
 	}
-	slog.Info("Ingest: Accepted stream.", "channelId", channelId)
+	slog.Info("Ingest: Accepted stream.", "channelId", channelInfo.Id)
+
+	// Send websocket notification
+	for _, wsc := range wsChannels {
+		wsc <- ChannelNotification{Id: channelInfo.Id, Name: channelInfo.Name, IsLive: true}
+	}
 }
 
 func handleViewerStart(w http.ResponseWriter, r *http.Request) {
@@ -344,8 +427,8 @@ func handleViewerStart(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		panic(err)
 	}
-	uniqueId := uniquePeerConnectionId
-	uniquePeerConnectionId += 1
+	uniqueId := nextUniquePeerConnectionId
+	nextUniquePeerConnectionId += 1
 	streamInfo.viewerPeerConnections[uniqueId] = peerConnection
 
 	// Add tracks
@@ -489,6 +572,11 @@ func handleIngestStop(w http.ResponseWriter, r *http.Request) {
 
 func onIngestPeerConnectionClosed(channelId string) {
 	slog.Info("Ingest: Channel peer connection closed.", "channelId", channelId)
+	channelInfo, err := findChannelInfoById(channelId)
+	if err != nil {
+		slog.Error("Ingest: Channel with unknown ID reported closed", "channelId", channelId)
+		return
+	}
 	webRtcDataLock.Lock()
 	defer webRtcDataLock.Unlock()
 
@@ -500,6 +588,11 @@ func onIngestPeerConnectionClosed(channelId string) {
 	}
 
 	delete(ingestInfo, channelId)
+
+	// Send websocket notification
+	for _, wsc := range wsChannels {
+		wsc <- ChannelNotification{Id: channelId, Name: channelInfo.Name, IsLive: false}
+	}
 }
 
 func addIngestTrack(channelId string, t *webrtc.TrackRemote) *webrtc.TrackLocalStaticRTP {

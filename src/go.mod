@@ -5,7 +5,9 @@ go 1.22.5
 require github.com/pion/webrtc/v4 v4.0.0-beta.26
 
 require (
+	github.com/3d0c/gmf v0.0.0-20220906170454-be727bc5b56c // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/pion/datachannel v1.5.8 // indirect
 	github.com/pion/dtls/v2 v2.2.12 // indirect
 	github.com/pion/dtls/v3 v3.0.0 // indirect
