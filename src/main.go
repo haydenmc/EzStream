@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"text/template"
 
 	"github.com/gorilla/websocket"
@@ -44,14 +45,15 @@ var (
 		CheckOrigin: func(r *http.Request) bool {
 			return true
 		}}
-	nextUniqueWsId uint64                              = 1
-	wsChannels     map[uint64]chan ChannelNotification = map[uint64]chan ChannelNotification{}
+	nextUniqueWsId atomic.Uint64
+	wsChannelsLock sync.RWMutex
+	wsChannels     = map[uint64]chan ChannelNotification{}
 
 	// WebRTC
-	webRtcApi                          *webrtc.API
-	webRtcDataLock                     sync.RWMutex
-	ingestInfo                         map[string]*IngestInfo
-	nextUniquePeerConnectionId         uint64
+	webRtcApi                  *webrtc.API
+	webRtcDataLock             sync.RWMutex
+	ingestInfo                 map[string]*IngestInfo
+	nextUniquePeerConnectionId atomic.Uint64
 	defaultPeerConnectionConfiguration = webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{
@@ -86,7 +88,6 @@ func main() {
 
 	// Init globals
 	ingestInfo = map[string]*IngestInfo{}
-	nextUniquePeerConnectionId = 1
 
 	// Parse flags
 	slog.Info("Parsing flags...")
@@ -175,11 +176,16 @@ func handleWebsocket(w http.ResponseWriter, r *http.Request) {
 			"expected", wsProtocol)
 		return
 	}
-	uniqueId := nextUniqueWsId
-	nextUniqueWsId += 1
+	uniqueId := nextUniqueWsId.Add(1)
 	receiveCh := make(chan ChannelNotification)
+	wsChannelsLock.Lock()
 	wsChannels[uniqueId] = receiveCh
-	defer delete(wsChannels, uniqueId)
+	wsChannelsLock.Unlock()
+	defer func() {
+		wsChannelsLock.Lock()
+		delete(wsChannels, uniqueId)
+		wsChannelsLock.Unlock()
+	}()
 	go func() {
 		for {
 			_, _, err := c.ReadMessage()
@@ -397,9 +403,7 @@ func handleIngestStart(w http.ResponseWriter, r *http.Request) {
 	slog.Info("Ingest: Accepted stream.", "channelId", channelInfo.Id)
 
 	// Send websocket notification
-	for _, wsc := range wsChannels {
-		wsc <- ChannelNotification{Id: channelInfo.Id, Name: channelInfo.Name, IsLive: true}
-	}
+	broadcastWsNotification(ChannelNotification{Id: channelInfo.Id, Name: channelInfo.Name, IsLive: true})
 }
 
 func handleViewerStart(w http.ResponseWriter, r *http.Request) {
@@ -429,8 +433,7 @@ func handleViewerStart(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		panic(err)
 	}
-	uniqueId := nextUniquePeerConnectionId
-	nextUniquePeerConnectionId += 1
+	uniqueId := nextUniquePeerConnectionId.Add(1)
 	streamInfo.viewerPeerConnections[uniqueId] = peerConnection
 
 	// Add tracks
@@ -581,8 +584,18 @@ func onIngestPeerConnectionClosed(channelId string) {
 	delete(ingestInfo, channelId)
 
 	// Send websocket notification
+	broadcastWsNotification(ChannelNotification{Id: channelId, Name: channelInfo.Name, IsLive: false})
+}
+
+func broadcastWsNotification(notification ChannelNotification) {
+	wsChannelsLock.RLock()
+	defer wsChannelsLock.RUnlock()
 	for _, wsc := range wsChannels {
-		wsc <- ChannelNotification{Id: channelId, Name: channelInfo.Name, IsLive: false}
+		select {
+		case wsc <- notification:
+		default:
+			slog.Warn("Websocket: Dropped notification for slow client")
+		}
 	}
 }
 
