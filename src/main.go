@@ -288,6 +288,11 @@ func findChannelInfoByAuthKey(authKey string) (*ChannelInfo, error) {
 }
 
 func handleIngestStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
 	// Authenticate and determine the channel ID
 	authRegex := regexp.MustCompile(`Bearer (\S+)`)
 	authHeader := r.Header.Get("Authorization")
