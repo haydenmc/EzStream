@@ -198,13 +198,11 @@ func TestHandleViewerStop_NotFound(t *testing.T) {
 	}
 }
 
-func TestWithCORS_Options(t *testing.T) {
-	handler := withCORS(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
+func TestHandlerCORS_Preflight(t *testing.T) {
+	srv := testServer()
 	req := httptest.NewRequest(http.MethodOptions, "/ingest", nil)
 	w := httptest.NewRecorder()
-	handler(w, req)
+	srv.HandleIngestStart(w, req)
 
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", w.Code)
@@ -214,18 +212,13 @@ func TestWithCORS_Options(t *testing.T) {
 	}
 }
 
-func TestWithCORS_PassThrough(t *testing.T) {
-	handler := withCORS(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusCreated)
-	})
-	req := httptest.NewRequest(http.MethodPost, "/ingest", nil)
+func TestHandlerCORS_HeadersOnNormalRequest(t *testing.T) {
+	srv := testServer()
+	req := httptest.NewRequest(http.MethodPost, "/ingest", strings.NewReader("fake-sdp"))
 	w := httptest.NewRecorder()
-	handler(w, req)
+	srv.HandleIngestStart(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", w.Code)
-	}
 	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
-		t.Fatal("expected CORS Allow-Origin header")
+		t.Fatal("expected CORS Allow-Origin header on non-preflight request")
 	}
 }
