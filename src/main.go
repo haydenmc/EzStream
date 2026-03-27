@@ -10,6 +10,8 @@ import (
 	"os"
 	"text/template"
 
+	"github.com/pion/interceptor"
+	"github.com/pion/interceptor/pkg/intervalpli"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -57,7 +59,28 @@ func main() {
 	}
 	// Filter to IPv4 only for now.
 	settingsEngine.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
-	webrtcAPI := webrtc.NewAPI(webrtc.WithSettingEngine(settingsEngine))
+
+	// Set up media engine and interceptors
+	mediaEngine := &webrtc.MediaEngine{}
+	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
+		panic(err)
+	}
+	interceptorRegistry := &interceptor.Registry{}
+	if err := webrtc.RegisterDefaultInterceptors(mediaEngine, interceptorRegistry); err != nil {
+		panic(err)
+	}
+	// Request periodic keyframes so new/recovering viewers get a clean frame quickly
+	intervalPliFactory, err := intervalpli.NewReceiverInterceptor()
+	if err != nil {
+		panic(err)
+	}
+	interceptorRegistry.Add(intervalPliFactory)
+
+	webrtcAPI := webrtc.NewAPI(
+		webrtc.WithSettingEngine(settingsEngine),
+		webrtc.WithMediaEngine(mediaEngine),
+		webrtc.WithInterceptorRegistry(interceptorRegistry),
+	)
 
 	// Load JSON file
 	content, err := os.ReadFile(*channelsJsonFilePath)
