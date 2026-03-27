@@ -405,7 +405,8 @@ func handleIngestStart(w http.ResponseWriter, r *http.Request) {
 	<-gatherComplete
 
 	// WHIP+WHEP expects a Location header and a HTTP Status Code of 201
-	w.Header().Add("Location", "/ingest/"+channelInfo.Id)
+	w.Header().Set("Content-Type", "application/sdp")
+	w.Header().Set("Location", "/ingest/"+channelInfo.Id)
 	w.WriteHeader(http.StatusCreated)
 
 	// Write Answer with Candidates as HTTP Response
@@ -521,7 +522,8 @@ func handleViewerStart(w http.ResponseWriter, r *http.Request) {
 	<-gatherComplete
 
 	// WHIP+WHEP expects a Location header and a HTTP Status Code of 201
-	w.Header().Add("Location", "/whep/"+channelId+"/"+strconv.FormatUint(uniqueId, 10))
+	w.Header().Set("Content-Type", "application/sdp")
+	w.Header().Set("Location", "/whep/"+channelId+"/"+strconv.FormatUint(uniqueId, 10))
 	w.WriteHeader(http.StatusCreated)
 
 	// Write Answer with Candidates as HTTP Response
