@@ -3,7 +3,6 @@ package main
 import (
 	_ "embed"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -38,7 +37,7 @@ var (
 	fontFileContents []byte
 
 	// Channels
-	channels []ChannelInfo
+	channelStore *ChannelStore
 
 	// Websocket
 	upgrader = websocket.Upgrader{Subprotocols: []string{wsProtocol},
@@ -62,18 +61,6 @@ var (
 		},
 	}
 )
-
-type ChannelNotification struct {
-	Id     string
-	Name   string
-	IsLive bool
-}
-
-type ChannelInfo struct {
-	Id      string
-	Name    string
-	AuthKey string
-}
 
 type IngestInfo struct {
 	streamerPeerConnection *webrtc.PeerConnection
@@ -125,11 +112,13 @@ func main() {
 		slog.Error("Could not open streams JSON file", "file", channelsJsonFilePath)
 		panic(err)
 	}
+	var channels []ChannelInfo
 	err = json.Unmarshal(content, &channels)
 	if err != nil {
 		slog.Error("Could not parse JSON data")
 		panic(err)
 	}
+	channelStore = NewChannelStore(channels)
 	for _, c := range channels {
 		slog.Info("Channel registered", "id", c.Id, "name", c.Name)
 	}
@@ -241,10 +230,11 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		IsLive bool
 		Name   string
 	}
-	data := make([]ChannelData, len(channels))
+	allChannels := channelStore.All()
+	data := make([]ChannelData, len(allChannels))
 	webRtcDataLock.Lock()
 	defer webRtcDataLock.Unlock()
-	for i, c := range channels {
+	for i, c := range allChannels {
 		_, isLive := ingestInfo[c.Id]
 		data[i].Id = c.Id
 		data[i].IsLive = isLive
@@ -255,16 +245,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 
 func handleWatch(w http.ResponseWriter, r *http.Request) {
 	channelId := r.PathValue("channelId")
-	channelFound := false
-	var channel ChannelInfo
-	for _, c := range channels {
-		if c.Id == channelId {
-			channel = c
-			channelFound = true
-			break
-		}
-	}
-	if !channelFound {
+	channel, err := channelStore.FindById(channelId)
+	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -283,24 +265,6 @@ func handleWatch(w http.ResponseWriter, r *http.Request) {
 	watchTemplate.Execute(w, data)
 }
 
-func findChannelInfoById(id string) (*ChannelInfo, error) {
-	for _, c := range channels {
-		if c.Id == id {
-			return &c, nil
-		}
-	}
-	return nil, errors.New("could not find channel with specified ID")
-}
-
-func findChannelInfoByAuthKey(authKey string) (*ChannelInfo, error) {
-	for _, c := range channels {
-		if c.AuthKey == authKey {
-			return &c, nil
-		}
-	}
-	return nil, errors.New("could not find channel with specified auth key")
-}
-
 func handleIngestStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -316,7 +280,7 @@ func handleIngestStart(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	channelInfo, err := findChannelInfoByAuthKey(authMatches[1])
+	channelInfo, err := channelStore.FindByAuthKey(authMatches[1])
 	if err != nil {
 		slog.Error("Authorization header does not match any known channels")
 		w.WriteHeader(http.StatusUnauthorized)
@@ -615,7 +579,7 @@ func handleIngestStop(w http.ResponseWriter, r *http.Request) {
 
 func onIngestPeerConnectionClosed(channelId string) {
 	slog.Info("Ingest: Channel peer connection closed.", "channelId", channelId)
-	channelInfo, err := findChannelInfoById(channelId)
+	channelInfo, err := channelStore.FindById(channelId)
 	if err != nil {
 		slog.Error("Ingest: Channel with unknown ID reported closed", "channelId", channelId)
 		return
