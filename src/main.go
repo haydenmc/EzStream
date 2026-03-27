@@ -349,7 +349,11 @@ func handleIngestStart(w http.ResponseWriter, r *http.Request) {
 
 	peerConnection.OnTrack(func(t *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		// Create a track to fan out our incoming video to all peers
-		trackLocal := addIngestTrack(channelInfo.Id, t)
+		trackLocal, err := addIngestTrack(channelInfo.Id, t)
+		if err != nil {
+			slog.Error("Ingest: Could not create local track", "error", err)
+			return
+		}
 		buf := make([]byte, 1500)
 		for {
 			i, _, err := t.Read(buf)
@@ -375,7 +379,9 @@ func handleIngestStart(w http.ResponseWriter, r *http.Request) {
 
 	if err := peerConnection.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeOffer, SDP: string(offer)}); err != nil {
-		panic(err)
+		slog.Error("Ingest: Could not set remote description", "error", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
 	}
 
 	// Create channel that is blocked until ICE Gathering is complete
@@ -384,9 +390,14 @@ func handleIngestStart(w http.ResponseWriter, r *http.Request) {
 	// Create answer
 	answer, err := peerConnection.CreateAnswer(nil)
 	if err != nil {
-		panic(err)
-	} else if err = peerConnection.SetLocalDescription(answer); err != nil {
-		panic(err)
+		slog.Error("Ingest: Could not create answer", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if err = peerConnection.SetLocalDescription(answer); err != nil {
+		slog.Error("Ingest: Could not set local description", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
 	// Block until ICE Gathering is complete, disabling trickle ICE
@@ -398,9 +409,7 @@ func handleIngestStart(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 
 	// Write Answer with Candidates as HTTP Response
-	if _, err = fmt.Fprint(w, peerConnection.LocalDescription().SDP); err != nil {
-		panic(err)
-	}
+	fmt.Fprint(w, peerConnection.LocalDescription().SDP)
 	slog.Info("Ingest: Accepted stream.", "channelId", channelInfo.Id)
 
 	// Send websocket notification
@@ -426,22 +435,28 @@ func handleViewerStart(w http.ResponseWriter, r *http.Request) {
 	// Read the offer from HTTP Request
 	offer, err := io.ReadAll(r.Body)
 	if err != nil {
-		panic(err)
+		slog.Error("Viewer: Could not read HTTP content", "error", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
 	}
 
 	// Create a new RTCPeerConnection
 	peerConnection, err := webRtcApi.NewPeerConnection(defaultPeerConnectionConfiguration)
 	if err != nil {
-		panic(err)
+		slog.Error("Viewer: Could not create peer connection", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	uniqueId := nextUniquePeerConnectionId.Add(1)
 	streamInfo.viewerPeerConnections[uniqueId] = peerConnection
 
 	// Add tracks
 	for _, t := range streamInfo.localTracks {
-		_, err := peerConnection.AddTrack(t)
-		if err != nil {
-			panic(err)
+		if _, err := peerConnection.AddTrack(t); err != nil {
+			slog.Error("Viewer: Could not add track", "error", err)
+			peerConnection.Close()
+			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
 	}
 
@@ -477,7 +492,10 @@ func handleViewerStart(w http.ResponseWriter, r *http.Request) {
 
 	if err := peerConnection.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeOffer, SDP: string(offer)}); err != nil {
-		panic(err)
+		slog.Error("Viewer: Could not set remote description", "error", err)
+		peerConnection.Close()
+		w.WriteHeader(http.StatusBadRequest)
+		return
 	}
 
 	// Create channel that is blocked until ICE Gathering is complete
@@ -486,9 +504,16 @@ func handleViewerStart(w http.ResponseWriter, r *http.Request) {
 	// Create answer
 	answer, err := peerConnection.CreateAnswer(nil)
 	if err != nil {
-		panic(err)
-	} else if err = peerConnection.SetLocalDescription(answer); err != nil {
-		panic(err)
+		slog.Error("Viewer: Could not create answer", "error", err)
+		peerConnection.Close()
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if err = peerConnection.SetLocalDescription(answer); err != nil {
+		slog.Error("Viewer: Could not set local description", "error", err)
+		peerConnection.Close()
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
 	// Block until ICE Gathering is complete, disabling trickle ICE
@@ -500,9 +525,7 @@ func handleViewerStart(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 
 	// Write Answer with Candidates as HTTP Response
-	if _, err = fmt.Fprint(w, peerConnection.LocalDescription().SDP); err != nil {
-		panic(err)
-	}
+	fmt.Fprint(w, peerConnection.LocalDescription().SDP)
 	slog.Info("Viewer: Accepted stream.", "channelId", channelId, "peerConnectionId", uniqueId)
 }
 
@@ -538,7 +561,9 @@ func handleViewerStop(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err = ingestInfo[channelId].viewerPeerConnections[connectionId].Close(); err != nil {
-		panic(err)
+		slog.Error("Viewer: Could not close peer connection", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	w.WriteHeader(http.StatusOK)
 }
@@ -560,7 +585,9 @@ func handleIngestStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := ingestInfo[channelId].streamerPeerConnection.Close(); err != nil {
-		panic(err)
+		slog.Error("Ingest: Could not close peer connection", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	w.WriteHeader(http.StatusOK)
 }
@@ -600,7 +627,7 @@ func broadcastWsNotification(notification ChannelNotification) {
 	}
 }
 
-func addIngestTrack(channelId string, t *webrtc.TrackRemote) *webrtc.TrackLocalStaticRTP {
+func addIngestTrack(channelId string, t *webrtc.TrackRemote) (*webrtc.TrackLocalStaticRTP, error) {
 	webRtcDataLock.Lock()
 	defer webRtcDataLock.Unlock()
 
@@ -608,7 +635,7 @@ func addIngestTrack(channelId string, t *webrtc.TrackRemote) *webrtc.TrackLocalS
 	trackLocal, err := webrtc.NewTrackLocalStaticRTP(t.Codec().RTPCodecCapability, t.ID(),
 		t.StreamID())
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 	ingestInfo[channelId].localTracks[trackLocal.ID()] = trackLocal
 	slog.Info("Ingest: Track added", "channel", channelId, "trackId", t.ID())
@@ -619,5 +646,5 @@ func addIngestTrack(channelId string, t *webrtc.TrackRemote) *webrtc.TrackLocalS
 			"existing viewers will not see the new track.", "channelId", channelId)
 	}
 
-	return trackLocal
+	return trackLocal, nil
 }
