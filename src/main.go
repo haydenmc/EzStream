@@ -44,9 +44,7 @@ var (
 		CheckOrigin: func(r *http.Request) bool {
 			return true
 		}}
-	nextUniqueWsId atomic.Uint64
-	wsChannelsLock sync.RWMutex
-	wsChannels     = map[uint64]chan ChannelNotification{}
+	notifier *Notifier
 
 	// WebRTC
 	webRtcApi                  *webrtc.API
@@ -75,6 +73,7 @@ func main() {
 
 	// Init globals
 	ingestInfo = map[string]*IngestInfo{}
+	notifier = NewNotifier()
 
 	// Parse flags
 	slog.Info("Parsing flags...")
@@ -179,18 +178,11 @@ func handleWebsocket(w http.ResponseWriter, r *http.Request) {
 			"expected", wsProtocol)
 		return
 	}
-	uniqueId := nextUniqueWsId.Add(1)
-	receiveCh := make(chan ChannelNotification, 1)
-	wsChannelsLock.Lock()
-	wsChannels[uniqueId] = receiveCh
-	wsChannelsLock.Unlock()
+	uniqueId, receiveCh := notifier.Subscribe()
 	// Remove from broadcast map and close channel before closing the connection.
 	// This ensures no broadcaster can send to a closed channel.
 	cleanup := sync.OnceFunc(func() {
-		wsChannelsLock.Lock()
-		delete(wsChannels, uniqueId)
-		wsChannelsLock.Unlock()
-		close(receiveCh)
+		notifier.Unsubscribe(uniqueId)
 	})
 	defer cleanup()
 	// Read goroutine: drains client messages and detects client-initiated close.
@@ -397,7 +389,7 @@ func handleIngestStart(w http.ResponseWriter, r *http.Request) {
 	slog.Info("Ingest: Accepted stream.", "channelId", channelInfo.Id)
 
 	// Send websocket notification
-	broadcastWsNotification(ChannelNotification{Id: channelInfo.Id, Name: channelInfo.Name, IsLive: true})
+	notifier.Broadcast(ChannelNotification{Id: channelInfo.Id, Name: channelInfo.Name, IsLive: true})
 }
 
 func handleViewerStart(w http.ResponseWriter, r *http.Request) {
@@ -597,19 +589,7 @@ func onIngestPeerConnectionClosed(channelId string) {
 	delete(ingestInfo, channelId)
 
 	// Send websocket notification
-	broadcastWsNotification(ChannelNotification{Id: channelId, Name: channelInfo.Name, IsLive: false})
-}
-
-func broadcastWsNotification(notification ChannelNotification) {
-	wsChannelsLock.RLock()
-	defer wsChannelsLock.RUnlock()
-	for _, wsc := range wsChannels {
-		select {
-		case wsc <- notification:
-		default:
-			slog.Warn("Websocket: Dropped notification for slow client")
-		}
-	}
+	notifier.Broadcast(ChannelNotification{Id: channelId, Name: channelInfo.Name, IsLive: false})
 }
 
 func addIngestTrack(channelId string, t *webrtc.TrackRemote) (*webrtc.TrackLocalStaticRTP, error) {
