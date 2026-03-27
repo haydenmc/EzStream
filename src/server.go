@@ -66,18 +66,11 @@ func NewServer(
 	}
 }
 
-func withCORS(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Expose-Headers", "Location")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next(w, r)
-	}
+func (s *Server) writeCORSHeaders(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	w.Header().Set("Access-Control-Expose-Headers", "Location")
 }
 
 func (s *Server) HandleWebsocket(w http.ResponseWriter, r *http.Request) {
@@ -172,6 +165,11 @@ func (s *Server) HandleWatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) HandleIngestStart(w http.ResponseWriter, r *http.Request) {
+	s.writeCORSHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -307,6 +305,11 @@ func (s *Server) HandleIngestStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) HandleViewerStart(w http.ResponseWriter, r *http.Request) {
+	s.writeCORSHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != http.MethodPost {
 		slog.Error("Viewer: WHEP start handler called with non-POST http method.")
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -421,6 +424,11 @@ func (s *Server) HandleViewerStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) HandleViewerStop(w http.ResponseWriter, r *http.Request) {
+	s.writeCORSHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != http.MethodDelete {
 		slog.Error("Viewer: WHEP stop handler called with non-DELETE http method.")
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -460,6 +468,11 @@ func (s *Server) HandleViewerStop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) HandleIngestStop(w http.ResponseWriter, r *http.Request) {
+	s.writeCORSHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != http.MethodDelete {
 		slog.Error("Ingest: Stop handler called with non-DELETE http method.")
 		w.WriteHeader(http.StatusMethodNotAllowed)

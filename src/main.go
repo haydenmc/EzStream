@@ -105,10 +105,10 @@ func main() {
 	http.HandleFunc("/watch/{channelId}", srv.HandleWatch)
 
 	// WHIP+WHEP WebRTC endpoints
-	http.HandleFunc("/ingest", withCORS(srv.HandleIngestStart))
-	http.HandleFunc("/ingest/{channelId}", withCORS(srv.HandleIngestStop))
-	http.HandleFunc("/whep/{channelId}", withCORS(srv.HandleViewerStart))
-	http.HandleFunc("/whep/{channelId}/{connectionId}", withCORS(srv.HandleViewerStop))
+	http.HandleFunc("/ingest", srv.HandleIngestStart)
+	http.HandleFunc("/ingest/{channelId}", srv.HandleIngestStop)
+	http.HandleFunc("/whep/{channelId}", srv.HandleViewerStart)
+	http.HandleFunc("/whep/{channelId}/{connectionId}", srv.HandleViewerStop)
 
 	// Websocket API
 	http.HandleFunc("/ws", srv.HandleWebsocket)
