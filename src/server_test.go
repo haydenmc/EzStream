@@ -123,15 +123,15 @@ func TestHandleIngestStop_MethodNotAllowed(t *testing.T) {
 	}
 }
 
-func TestHandleIngestStop_NotFound(t *testing.T) {
+func TestHandleIngestStop_AlreadyStopped(t *testing.T) {
 	srv := testServer()
 	req := httptest.NewRequest(http.MethodDelete, "/ingest/chan1", nil)
 	req.SetPathValue("channelId", "chan1")
 	w := httptest.NewRecorder()
 	srv.HandleIngestStop(w, req)
 
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("expected 404, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
 }
 
