@@ -177,39 +177,40 @@ func handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uniqueId := nextUniqueWsId.Add(1)
-	receiveCh := make(chan ChannelNotification)
+	receiveCh := make(chan ChannelNotification, 1)
 	wsChannelsLock.Lock()
 	wsChannels[uniqueId] = receiveCh
 	wsChannelsLock.Unlock()
-	defer func() {
+	// Remove from broadcast map and close channel before closing the connection.
+	// This ensures no broadcaster can send to a closed channel.
+	cleanup := sync.OnceFunc(func() {
 		wsChannelsLock.Lock()
 		delete(wsChannels, uniqueId)
 		wsChannelsLock.Unlock()
-	}()
+		close(receiveCh)
+	})
+	defer cleanup()
+	// Read goroutine: drains client messages and detects client-initiated close.
+	// Closing the connection unblocks ReadMessage so this goroutine will exit.
 	go func() {
 		for {
 			_, _, err := c.ReadMessage()
-			if _, ok := err.(*websocket.CloseError); ok {
-				slog.Info("Websocket: Socket closed by client", "wsId", uniqueId)
-				close(receiveCh)
-				return
-			} else if err != nil {
-				slog.Error("Websocket: Receive error", "wsId", uniqueId, "err", err)
-				close(receiveCh)
+			if err != nil {
+				if _, ok := err.(*websocket.CloseError); ok {
+					slog.Info("Websocket: Socket closed by client", "wsId", uniqueId)
+				} else {
+					slog.Error("Websocket: Receive error", "wsId", uniqueId, "err", err)
+				}
+				cleanup()
 				return
 			}
 		}
 	}()
 	slog.Info("Websocket: Socket opened", "wsId", uniqueId)
-	for {
-		channelUpdate, ok := <-receiveCh
-		if !ok {
-			slog.Info("Websocket: Channel closed", "wsId", uniqueId)
-			break
-		}
-		err = c.WriteJSON(channelUpdate)
+	for notification := range receiveCh {
+		err = c.WriteJSON(notification)
 		if err != nil {
-			slog.Error("Websocket: Could not marshal JSON data", "err", err)
+			slog.Error("Websocket: Could not send JSON data", "err", err)
 			break
 		}
 	}
