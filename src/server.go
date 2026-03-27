@@ -483,9 +483,9 @@ func (s *Server) HandleIngestStop(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.streams[channelId]; !ok {
-		slog.Error("Ingest: Stop handler called with non-existent channel ID.",
-			"channelId", channelId)
-		w.WriteHeader(http.StatusNotFound)
+		// Stream may have already been cleaned up by the connection state callback
+		slog.Info("Ingest: Stream already stopped.", "channelId", channelId)
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 	if err := s.streams[channelId].streamerPeerConnection.Close(); err != nil {
