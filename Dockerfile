@@ -1,5 +1,5 @@
 # build
-FROM golang:alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 RUN apk add --no-cache ca-certificates
 # leverage module cache
@@ -7,7 +7,7 @@ COPY src/go.mod src/go.sum ./
 RUN go mod download
 
 COPY src/ .
-RUN go build -trimpath -o /out/app ./main.go
+RUN go build -trimpath -o /out/app .
 
 # runtime
 FROM alpine:latest
