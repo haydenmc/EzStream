@@ -152,16 +152,30 @@ func main() {
 	http.HandleFunc("/watch/{channelId}", handleWatch)
 
 	// WHIP+WHEP WebRTC endpoints
-	http.HandleFunc("/ingest", handleIngestStart)
-	http.HandleFunc("/ingest/{channelId}", handleIngestStop)
-	http.HandleFunc("/whep/{channelId}", handleViewerStart)
-	http.HandleFunc("/whep/{channelId}/{connectionId}", handleViewerStop)
+	http.HandleFunc("/ingest", withCORS(handleIngestStart))
+	http.HandleFunc("/ingest/{channelId}", withCORS(handleIngestStop))
+	http.HandleFunc("/whep/{channelId}", withCORS(handleViewerStart))
+	http.HandleFunc("/whep/{channelId}/{connectionId}", withCORS(handleViewerStop))
 
 	// Websocket API
 	http.HandleFunc("/ws", handleWebsocket)
 
 	slog.Info("Starting HTTP server...")
 	http.ListenAndServe(*httpListenAddress, nil)
+}
+
+func withCORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Expose-Headers", "Location")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next(w, r)
+	}
 }
 
 func handleWebsocket(w http.ResponseWriter, r *http.Request) {
