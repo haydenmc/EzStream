@@ -136,6 +136,9 @@ func main() {
 	// Websocket API
 	http.HandleFunc("/ws", srv.HandleWebsocket)
 
+	// Thumbnail images for live streams
+	http.HandleFunc("/thumbnail/{channelId}", srv.HandleThumbnail)
+
 	slog.Info("Starting HTTP server...")
 	http.ListenAndServe(*httpListenAddress, nil)
 }

@@ -12,6 +12,7 @@ RUN go build -trimpath -o /out/app .
 # runtime
 FROM alpine:latest
 WORKDIR /app
+RUN apk add --no-cache ffmpeg
 COPY --from=build /out/app /app/app
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 ENTRYPOINT ["./app"]

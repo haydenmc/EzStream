@@ -28,14 +28,17 @@ type IngestInfo struct {
 }
 
 type Server struct {
-	channels    *ChannelStore
-	notifier    *Notifier
-	webrtcAPI   *webrtc.API
+	channels     *ChannelStore
+	notifier     *Notifier
+	webrtcAPI    *webrtc.API
 	webrtcConfig webrtc.Configuration
 
-	mu             sync.RWMutex
-	streams        map[string]*IngestInfo
-	nextViewerId   atomic.Uint64
+	mu           sync.RWMutex
+	streams      map[string]*IngestInfo
+	nextViewerId atomic.Uint64
+
+	thumbnailsMu sync.RWMutex
+	thumbnails   map[string][]byte
 
 	indexTemplate *template.Template
 	watchTemplate *template.Template
@@ -57,6 +60,7 @@ func NewServer(
 		webrtcAPI:     webrtcAPI,
 		webrtcConfig:  webrtcConfig,
 		streams:       map[string]*IngestInfo{},
+		thumbnails:    map[string][]byte{},
 		indexTemplate: indexTemplate,
 		watchTemplate: watchTemplate,
 		upgrader: websocket.Upgrader{
@@ -125,20 +129,29 @@ func (s *Server) HandleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type ChannelData struct {
-		Id     string
-		IsLive bool
-		Name   string
+		Id           string
+		IsLive       bool
+		HasThumbnail bool
+		Name         string
 	}
 	allChannels := s.channels.All()
 	data := make([]ChannelData, len(allChannels))
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for i, c := range allChannels {
 		_, isLive := s.streams[c.Id]
 		data[i].Id = c.Id
 		data[i].IsLive = isLive
 		data[i].Name = c.Name
 	}
+	s.mu.Unlock()
+
+	s.thumbnailsMu.RLock()
+	for i, c := range allChannels {
+		_, data[i].HasThumbnail = s.thumbnails[c.Id]
+	}
+	s.thumbnailsMu.RUnlock()
+
 	s.indexTemplate.Execute(w, data)
 }
 
@@ -241,13 +254,21 @@ func (s *Server) HandleIngestStart(w http.ResponseWriter, r *http.Request) {
 			slog.Error("Ingest: Could not create local track", "error", err)
 			return
 		}
+		var extractor *thumbnailExtractor
+		if t.Kind() == webrtc.RTPCodecTypeVideo {
+			extractor = newThumbnailExtractor(t.Codec().MimeType)
+		}
 		buf := make([]byte, 1500)
 		for {
 			i, _, err := t.Read(buf)
 			if err != nil {
 				return
 			}
-
+			if extractor != nil {
+				if jpeg := extractor.Feed(buf[:i]); jpeg != nil {
+					s.storeThumbnail(channelInfo.Id, jpeg)
+				}
+			}
 			if _, err = trackLocal.Write(buf[:i]); err != nil {
 				return
 			}
@@ -503,20 +524,41 @@ func (s *Server) onIngestPeerConnectionClosed(channelId string) {
 		slog.Error("Ingest: Channel with unknown ID reported closed", "channelId", channelId)
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
-	// Close all viewer connections
+	s.mu.Lock()
 	slog.Info("Ingest: Closing viewer connections", "channelId", channelId,
 		"numViewerConnections", len(s.streams[channelId].viewerPeerConnections))
 	for _, c := range s.streams[channelId].viewerPeerConnections {
 		c.Close()
 	}
-
 	delete(s.streams, channelId)
+	s.mu.Unlock()
 
-	// Send websocket notification
+	s.thumbnailsMu.Lock()
+	delete(s.thumbnails, channelId)
+	s.thumbnailsMu.Unlock()
+
 	s.notifier.Broadcast(ChannelNotification{Id: channelId, Name: channelInfo.Name, IsLive: false})
+}
+
+func (s *Server) storeThumbnail(channelId string, data []byte) {
+	s.thumbnailsMu.Lock()
+	s.thumbnails[channelId] = data
+	s.thumbnailsMu.Unlock()
+}
+
+func (s *Server) HandleThumbnail(w http.ResponseWriter, r *http.Request) {
+	channelId := r.PathValue("channelId")
+	s.thumbnailsMu.RLock()
+	data, ok := s.thumbnails[channelId]
+	s.thumbnailsMu.RUnlock()
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
+	w.Write(data)
 }
 
 func (s *Server) addIngestTrack(channelId string, t *webrtc.TrackRemote) (*webrtc.TrackLocalStaticRTP, error) {
