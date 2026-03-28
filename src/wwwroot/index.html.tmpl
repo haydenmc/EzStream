@@ -12,9 +12,13 @@
         class="{{if $channel.IsLive}}live{{else}}offline{{end}}"
         style="--animation-order: {{$index}};">
         <a href="/watch/{{$channel.Id}}">
+          {{if and $channel.IsLive $channel.HasThumbnail}}
+          <img class="preview" src="/thumbnail/{{$channel.Id}}" alt="Stream preview">
+          {{else}}
           <div class="preview placeholder">
             <span>{{if $channel.IsLive}}...{{else}}OFFLINE{{end}}</span>
           </div>
+          {{end}}
           <div class="channel-name">{{$channel.Name}}</div>
         </a>
       </li>
