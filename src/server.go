@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -151,6 +152,10 @@ func (s *Server) HandleIndex(w http.ResponseWriter, r *http.Request) {
 		_, data[i].HasThumbnail = s.thumbnails[c.Id]
 	}
 	s.thumbnailsMu.RUnlock()
+
+	sort.Slice(data, func(i, j int) bool {
+		return data[i].IsLive && !data[j].IsLive
+	})
 
 	s.indexTemplate.Execute(w, data)
 }
