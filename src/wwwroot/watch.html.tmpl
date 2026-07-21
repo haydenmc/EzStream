@@ -4,48 +4,21 @@
   <title>{{.Name}}</title>
   <link rel="stylesheet" href="/style.css">
 </head>
-<body>
-  <main>
-    {{if .IsLive}}
-    <video autoplay controls>
-    </video>
-    <script>
-      let peerConnection = new RTCPeerConnection()
-      window.addEventListener("load", () => {
-        peerConnection.addTransceiver('video', { direction: 'recvonly' })
-        peerConnection.addTransceiver('audio', { direction: 'recvonly' })
-        let inboundStream = null;
-        peerConnection.ontrack = (event) => {
-          if (!inboundStream) {
-            inboundStream = new MediaStream();
-            document.querySelector('video').srcObject = inboundStream;
-          }
-          inboundStream.addTrack(event.track);
-        }
-
-        peerConnection.createOffer().then(offer => {
-          peerConnection.setLocalDescription(offer)
-
-          fetch(`/whep/{{.Id}}`, {
-            method: 'POST',
-            body: offer.sdp,
-            headers: {
-              Authorization: `Bearer none`,
-              'Content-Type': 'application/sdp'
-            }
-          }).then(r => r.text())
-            .then(answer => {
-              peerConnection.setRemoteDescription({
-                sdp: answer,
-                type: 'answer'
-              })
-            })
-        })
-      })
-    </script>
-    {{else}}
-    <h1>This stream is not active.</h1>
-    {{end}}
+<body
+  data-channel-id="{{.Id}}"
+  data-live="{{.IsLive}}"
+  data-has-thumbnail="{{.HasThumbnail}}">
+  <svg class="sprite" aria-hidden="true" style="display: none;">
+    <symbol id="icon-muted" viewBox="0 0 48 48">
+      <path d="m 23.176396,11.773639 v 24.450913 c 0,1.548811 -0.89628,1.919511 -1.990604,0.825186 L 13.832744,29.696691 H 8.8156096 A 2.8208687,2.8208687 0 0 1 5.999819,26.885979 V 21.11729 A 2.8234078,2.8234078 0 0 1 8.8130706,18.3015 h 5.0196734 l 7.353048,-7.353047 c 1.091785,-1.091786 1.990604,-0.721087 1.990604,0.825186 z m 18.410548,17.488877 a 1.4075699,1.4075699 0 1 1 -1.990603,1.990604 l -5.260883,-5.263421 -5.263421,5.263421 a 1.4075699,1.4075699 0 1 1 -1.990604,-1.990604 l 5.263422,-5.26342 -5.263422,-5.263421 a 1.4066726,1.4066726 0 0 1 1.990604,-1.988066 l 5.260883,5.263422 5.260881,-5.263422 a 1.4066729,1.4066729 0 0 1 1.990605,1.988066 l -5.260883,5.263421 z" />
+    </symbol>
+  </svg>
+  <main class="watch">
+    <video playsinline></video>
+    <div id="overlay" class="overlay">
+      <div class="overlay-content"></div>
+    </div>
   </main>
+  <script src="/watch.js"></script>
 </body>
 </html>

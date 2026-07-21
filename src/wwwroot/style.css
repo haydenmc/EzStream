@@ -138,7 +138,98 @@ video {
     left: 0;
     width: 100vw;
     height: 100vh;
+    background-color: #000;
 }
     video:focus {
         outline: none;
     }
+
+/* Overlay shown over the video for offline/connecting/unmute states */
+.overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: rgba(var(--background-rgb), 0.6);
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    /* Let clicks fall through to the video (native controls); only the
+       interactive button inside re-enables pointer events. */
+    pointer-events: none;
+}
+    .overlay[hidden] {
+        display: none;
+    }
+
+    /* Dim the poster thumbnail so overlaid text/buttons stay legible. */
+    .overlay[style*="url"]::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background-color: rgba(var(--background-rgb), 0.55);
+    }
+
+    .overlay .overlay-button {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+    }
+    .overlay .overlay-button-icon {
+        width: 72px;
+        height: 72px;
+        fill: currentColor;
+    }
+
+    .overlay .overlay-content {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+        text-align: center;
+        padding: 24px;
+    }
+
+    .overlay .overlay-message {
+        margin: 0;
+        font-size: var(--font-size-huge);
+        font-weight: 600;
+        color: rgba(var(--foreground-rgb), 0.85);
+    }
+
+    .overlay .overlay-button {
+        pointer-events: auto;
+        cursor: pointer;
+        border: 4px solid var(--accent-color);
+        padding: 16px 32px;
+        font-family: inherit;
+        font-size: var(--font-size-huge);
+        font-weight: 700;
+        color: var(--accent-color);
+        background-color: rgba(var(--background-rgb), 0.25);
+        transition: transform 200ms cubic-bezier(0.215, 0.610, 0.355, 1.000);
+    }
+        .overlay .overlay-button:hover {
+            transform: scale(1.05);
+        }
+        .overlay .overlay-button:active {
+            transform: scale(0.95);
+        }
+
+    /* Connecting spinner */
+    .overlay .spinner {
+        width: 64px;
+        height: 64px;
+        border-radius: 50%;
+        border: 6px solid rgba(var(--foreground-rgb), 0.2);
+        border-top-color: var(--accent-color);
+        animation: spin 800ms linear infinite;
+    }
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}

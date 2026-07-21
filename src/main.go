@@ -24,6 +24,8 @@ var (
 	watchTemplate     = template.Must(template.New("watch").Parse(watchFileContents))
 	//go:embed wwwroot/style.css
 	styleFileContents string
+	//go:embed wwwroot/watch.js
+	watchScriptContents string
 	//go:embed wwwroot/Inter.var.woff2
 	fontFileContents []byte
 )
@@ -116,6 +118,11 @@ func main() {
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		io.WriteString(w, styleFileContents)
+	})
+	http.HandleFunc("/watch.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, watchScriptContents)
 	})
 	http.HandleFunc("/Inter.var.woff2", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "font/woff2")
