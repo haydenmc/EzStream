@@ -167,17 +167,24 @@ func (s *Server) HandleWatch(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	type WatchData struct {
-		Id     string
-		IsLive bool
-		Name   string
+		Id           string
+		IsLive       bool
+		HasThumbnail bool
+		Name         string
 	}
+	s.mu.Lock()
 	_, isLive := s.streams[channelId]
+	s.mu.Unlock()
+
+	s.thumbnailsMu.RLock()
+	_, hasThumbnail := s.thumbnails[channelId]
+	s.thumbnailsMu.RUnlock()
+
 	data := WatchData{}
 	data.Id = channelId
 	data.IsLive = isLive
+	data.HasThumbnail = hasThumbnail
 	data.Name = channel.Name
 	s.watchTemplate.Execute(w, data)
 }
