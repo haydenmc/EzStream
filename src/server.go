@@ -11,13 +11,17 @@ import (
 	"sync"
 	"sync/atomic"
 	"text/template"
+	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 )
 
 const (
 	wsProtocol = "stream-updates"
+	// Minimum time between viewer keyframe requests forwarded to a streamer.
+	keyframeRequestMinInterval = 500 * time.Millisecond
 )
 
 type IngestInfo struct {
@@ -26,6 +30,55 @@ type IngestInfo struct {
 	// to outgoing watcher peer connections.
 	localTracks           map[string]*webrtc.TrackLocalStaticRTP
 	viewerPeerConnections map[uint64]*webrtc.PeerConnection
+
+	// videoSSRC is the SSRC of the streamer's video track, or 0 until it arrives.
+	videoSSRC atomic.Uint32
+	// lastKeyframeRequest is when a viewer keyframe request was last forwarded
+	// to the streamer, in Unix nanoseconds.
+	lastKeyframeRequest atomic.Int64
+}
+
+// requestKeyframe asks the streamer for a keyframe on behalf of a viewer.
+// Requests are throttled so many viewers can't flood the encoder.
+func (i *IngestInfo) requestKeyframe() {
+	ssrc := i.videoSSRC.Load()
+	if ssrc == 0 {
+		return
+	}
+	now := time.Now().UnixNano()
+	last := i.lastKeyframeRequest.Load()
+	if now-last < int64(keyframeRequestMinInterval) ||
+		!i.lastKeyframeRequest.CompareAndSwap(last, now) {
+		return
+	}
+	if err := i.streamerPeerConnection.WriteRTCP([]rtcp.Packet{
+		&rtcp.PictureLossIndication{MediaSSRC: ssrc},
+	}); err != nil {
+		slog.Warn("Ingest: Could not forward keyframe request", "error", err)
+	}
+}
+
+// readViewerRTCP drains RTCP feedback from a viewer until the sender stops.
+// Reading is what drives Pion's interceptors, so without it viewer NACKs are
+// never answered with retransmissions. Keyframe requests are passed on to the
+// streamer.
+func readViewerRTCP(streamInfo *IngestInfo, sender *webrtc.RTPSender) {
+	isVideo := sender.Track().Kind() == webrtc.RTPCodecTypeVideo
+	for {
+		packets, _, err := sender.ReadRTCP()
+		if err != nil {
+			return
+		}
+		if !isVideo {
+			continue
+		}
+		for _, p := range packets {
+			switch p.(type) {
+			case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+				streamInfo.requestKeyframe()
+			}
+		}
+	}
 }
 
 type Server struct {
@@ -268,7 +321,9 @@ func (s *Server) HandleIngestStart(w http.ResponseWriter, r *http.Request) {
 		}
 		var extractor *thumbnailExtractor
 		if t.Kind() == webrtc.RTPCodecTypeVideo {
-			extractor = newThumbnailExtractor(t.Codec().MimeType)
+			extractor = newThumbnailExtractor(t.Codec().MimeType, func(jpeg []byte) {
+				s.storeThumbnail(channelInfo.Id, peerConnection, jpeg)
+			})
 		}
 		buf := make([]byte, 1500)
 		for {
@@ -277,9 +332,7 @@ func (s *Server) HandleIngestStart(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if extractor != nil {
-				if jpeg := extractor.Feed(buf[:i]); jpeg != nil {
-					s.storeThumbnail(channelInfo.Id, jpeg)
-				}
+				extractor.Feed(buf[:i])
 			}
 			if _, err = trackLocal.Write(buf[:i]); err != nil {
 				return
@@ -378,12 +431,14 @@ func (s *Server) HandleViewerStart(w http.ResponseWriter, r *http.Request) {
 
 	// Add tracks
 	for _, t := range streamInfo.localTracks {
-		if _, err := peerConnection.AddTrack(t); err != nil {
+		sender, err := peerConnection.AddTrack(t)
+		if err != nil {
 			slog.Error("Viewer: Could not add track", "error", err)
 			peerConnection.Close()
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		go readViewerRTCP(streamInfo, sender)
 	}
 
 	// Set the handler for ICE connection state
@@ -553,7 +608,15 @@ func (s *Server) onIngestPeerConnectionClosed(channelId string) {
 	s.notifier.Broadcast(ChannelNotification{Id: channelId, Name: channelInfo.Name, IsLive: false})
 }
 
-func (s *Server) storeThumbnail(channelId string, data []byte) {
+// storeThumbnail saves a thumbnail generated from the given streamer
+// connection. Thumbnails are generated asynchronously, so one that finishes
+// after its stream has ended (or been replaced) is discarded.
+func (s *Server) storeThumbnail(channelId string, streamer *webrtc.PeerConnection, data []byte) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if info, ok := s.streams[channelId]; !ok || info.streamerPeerConnection != streamer {
+		return
+	}
 	s.thumbnailsMu.Lock()
 	s.thumbnails[channelId] = data
 	s.thumbnailsMu.Unlock()
@@ -584,6 +647,9 @@ func (s *Server) addIngestTrack(channelId string, t *webrtc.TrackRemote) (*webrt
 		return nil, err
 	}
 	s.streams[channelId].localTracks[trackLocal.ID()] = trackLocal
+	if t.Kind() == webrtc.RTPCodecTypeVideo {
+		s.streams[channelId].videoSSRC.Store(uint32(t.SSRC()))
+	}
 	slog.Info("Ingest: Track added", "channel", channelId, "trackId", t.ID())
 
 	// Update all viewers with new track

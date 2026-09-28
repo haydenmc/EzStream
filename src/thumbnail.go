@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/rtp"
@@ -19,11 +20,15 @@ const thumbnailInterval = 10 * time.Second
 var h264StartCode = []byte{0, 0, 0, 1}
 
 // thumbnailExtractor processes an RTP video stream and periodically generates
-// JPEG thumbnails by running FFmpeg on extracted keyframes. Not safe for
-// concurrent use.
+// JPEG thumbnails by running FFmpeg on extracted keyframes. FFmpeg runs on its
+// own goroutine so it never stalls the caller's RTP forwarding; finished
+// thumbnails are delivered to onThumbnail from that goroutine. Feed is not
+// safe for concurrent use.
 type thumbnailExtractor struct {
-	mimeType string
-	lastGen  time.Time
+	mimeType    string
+	lastGen     time.Time // when the last generation attempt started
+	generating  atomic.Bool
+	onThumbnail func(jpeg []byte)
 
 	// H264 state
 	h264SPS []byte // most recently seen SPS NAL unit
@@ -39,41 +44,40 @@ type thumbnailExtractor struct {
 	av1SH       []byte // cached Sequence Header OBU to prepend when SH is absent
 }
 
-func newThumbnailExtractor(mimeType string) *thumbnailExtractor {
-	return &thumbnailExtractor{mimeType: strings.ToLower(mimeType)}
+func newThumbnailExtractor(mimeType string, onThumbnail func(jpeg []byte)) *thumbnailExtractor {
+	return &thumbnailExtractor{mimeType: strings.ToLower(mimeType), onThumbnail: onThumbnail}
 }
 
-// Feed processes one raw RTP packet (header + payload) and returns JPEG bytes
-// when a new thumbnail has been generated, or nil otherwise.
-func (e *thumbnailExtractor) Feed(rawRTP []byte) []byte {
+// Feed processes one raw RTP packet (header + payload), starting thumbnail
+// generation in the background once a complete keyframe is available.
+func (e *thumbnailExtractor) Feed(rawRTP []byte) {
 	if time.Since(e.lastGen) < thumbnailInterval {
-		return nil
+		return
 	}
 	var pkt rtp.Packet
 	if err := pkt.Unmarshal(rawRTP); err != nil {
-		return nil
+		return
 	}
 	switch e.mimeType {
 	case "video/h264":
-		return e.feedH264(&pkt)
+		e.feedH264(&pkt)
 	case "video/av1":
-		return e.feedAV1(&pkt)
+		e.feedAV1(&pkt)
 	}
-	return nil
 }
 
 // feedH264 depacketizes one H264 RTP packet and generates a thumbnail when a
 // complete IDR frame is available.
-func (e *thumbnailExtractor) feedH264(pkt *rtp.Packet) []byte {
+func (e *thumbnailExtractor) feedH264(pkt *rtp.Packet) {
 	payload := pkt.Payload
 	if len(payload) == 0 {
-		return nil
+		return
 	}
 	naluType := payload[0] & 0x1f
 	switch {
 	case naluType >= 1 && naluType <= 23:
 		// Single NAL unit packet
-		return e.processH264NAL(payload)
+		e.processH264NAL(payload)
 
 	case naluType == 24:
 		// STAP-A: multiple NAL units bundled in one packet
@@ -84,8 +88,8 @@ func (e *thumbnailExtractor) feedH264(pkt *rtp.Packet) []byte {
 			if off+size > len(payload) {
 				break
 			}
-			if jpeg := e.processH264NAL(payload[off : off+size]); jpeg != nil {
-				return jpeg
+			if e.processH264NAL(payload[off : off+size]) {
+				return
 			}
 			off += size
 		}
@@ -93,7 +97,7 @@ func (e *thumbnailExtractor) feedH264(pkt *rtp.Packet) []byte {
 	case naluType == 28:
 		// FU-A: NAL unit fragmented across multiple packets
 		if len(payload) < 2 {
-			return nil
+			return
 		}
 		fuHeader := payload[1]
 		if fuHeader&0x80 != 0 { // start bit
@@ -102,23 +106,23 @@ func (e *thumbnailExtractor) feedH264(pkt *rtp.Packet) []byte {
 			e.h264FU = []byte{(payload[0] & 0xe0) | (fuHeader & 0x1f)}
 		}
 		if len(e.h264FU) == 0 {
-			return nil
+			return
 		}
 		e.h264FU = append(e.h264FU, payload[2:]...)
 		if fuHeader&0x40 != 0 { // end bit
 			nal := e.h264FU
 			e.h264FU = nil
-			return e.processH264NAL(nal)
+			e.processH264NAL(nal)
 		}
 	}
-	return nil
 }
 
-// processH264NAL inspects a single NAL unit. It caches SPS/PPS and returns
-// JPEG bytes when an IDR frame arrives with both SPS and PPS available.
-func (e *thumbnailExtractor) processH264NAL(nal []byte) []byte {
+// processH264NAL inspects a single NAL unit. It caches SPS/PPS and starts
+// thumbnail generation when an IDR frame arrives with both SPS and PPS
+// available, reporting whether it did so.
+func (e *thumbnailExtractor) processH264NAL(nal []byte) bool {
 	if len(nal) == 0 {
-		return nil
+		return false
 	}
 	switch nal[0] & 0x1f {
 	case 7: // SPS
@@ -127,7 +131,7 @@ func (e *thumbnailExtractor) processH264NAL(nal []byte) []byte {
 		e.h264PPS = append([]byte(nil), nal...)
 	case 5: // IDR (keyframe)
 		if len(e.h264SPS) == 0 || len(e.h264PPS) == 0 {
-			return nil
+			return false
 		}
 		var frame bytes.Buffer
 		frame.Write(h264StartCode)
@@ -136,9 +140,10 @@ func (e *thumbnailExtractor) processH264NAL(nal []byte) []byte {
 		frame.Write(e.h264PPS)
 		frame.Write(h264StartCode)
 		frame.Write(nal)
-		return e.runFFmpeg("h264", frame.Bytes())
+		e.generate("h264", frame.Bytes())
+		return true
 	}
-	return nil
+	return false
 }
 
 // feedAV1 depacketizes one AV1 RTP packet and generates a thumbnail once a
@@ -151,10 +156,10 @@ func (e *thumbnailExtractor) processH264NAL(nal []byte) []byte {
 //
 // The Sequence Header is cached so it can be prepended to keyframes that OBS
 // sends without one (PLI-triggered keyframes sometimes omit the SH).
-func (e *thumbnailExtractor) feedAV1(pkt *rtp.Packet) []byte {
+func (e *thumbnailExtractor) feedAV1(pkt *rtp.Packet) {
 	var ap codecs.AV1Packet //nolint:staticcheck
 	if _, err := ap.Unmarshal(pkt.Payload); err != nil {
-		return nil
+		return
 	}
 	if ap.N {
 		// N=1 marks the start of a new coded video sequence.
@@ -165,11 +170,11 @@ func (e *thumbnailExtractor) feedAV1(pkt *rtp.Packet) []byte {
 		e.av1HasFrame = false
 	}
 	if !e.av1InSeq {
-		return nil
+		return
 	}
 	assembled, err := e.av1Asm.ReadFrames(&ap) //nolint:staticcheck
 	if err != nil {
-		return nil
+		return
 	}
 	for _, raw := range assembled {
 		e.bufferAV1OBU(raw)
@@ -187,16 +192,15 @@ func (e *thumbnailExtractor) feedAV1(pkt *rtp.Packet) []byte {
 
 		if !e.av1HasSH {
 			if len(e.av1SH) == 0 {
-				return nil
+				return
 			}
 			var buf bytes.Buffer
 			buf.Write(e.av1SH)
 			buf.Write(data)
 			data = buf.Bytes()
 		}
-		return e.runFFmpeg("av1", data)
+		e.generate("av1", data)
 	}
-	return nil
 }
 
 // bufferAV1OBU sanitizes one raw OBU element (as returned by frame.AV1.ReadFrames)
@@ -277,7 +281,24 @@ func buildIVF(data []byte) []byte {
 	return buf
 }
 
-func (e *thumbnailExtractor) runFFmpeg(codec string, data []byte) []byte {
+// generate runs FFmpeg on one keyframe in the background. The attempt counts
+// towards thumbnailInterval whether or not it succeeds, so a keyframe FFmpeg
+// can't decode isn't retried on every subsequent keyframe. data must not be
+// modified by the caller afterwards.
+func (e *thumbnailExtractor) generate(codec string, data []byte) {
+	e.lastGen = time.Now()
+	if !e.generating.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer e.generating.Store(false)
+		if jpeg := runFFmpeg(codec, data); jpeg != nil {
+			e.onThumbnail(jpeg)
+		}
+	}()
+}
+
+func runFFmpeg(codec string, data []byte) []byte {
 	// AV1: wrap OBU data in an IVF container so FFmpeg's ivf demuxer is used
 	// instead of the raw av1 demuxer (which expects Annex B framing). IVF is
 	// fully sequential so piped input works without seeking.
@@ -310,6 +331,5 @@ func (e *thumbnailExtractor) runFFmpeg(codec string, data []byte) []byte {
 		return nil
 	}
 	slog.Info("Thumbnail: Generated", "codec", codec, "bytes", len(out))
-	e.lastGen = time.Now()
 	return out
 }
