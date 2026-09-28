@@ -6,7 +6,10 @@ import (
 	"strings"
 	"testing"
 	"text/template"
+	"time"
 
+	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -220,5 +223,137 @@ func TestHandlerCORS_HeadersOnNormalRequest(t *testing.T) {
 
 	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
 		t.Fatal("expected CORS Allow-Origin header on non-preflight request")
+	}
+}
+
+// postSDP creates an offer on pc, sends it through the given handler and
+// applies the answer.
+func postSDP(t *testing.T, pc *webrtc.PeerConnection, handler http.HandlerFunc,
+	prepare func(r *http.Request)) {
+	t.Helper()
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatherComplete := webrtc.GatheringCompletePromise(pc)
+	if err := pc.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	<-gatherComplete
+
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(pc.LocalDescription().SDP))
+	prepare(req)
+	w := httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", w.Code)
+	}
+	if err := pc.SetRemoteDescription(webrtc.SessionDescription{
+		Type: webrtc.SDPTypeAnswer, SDP: w.Body.String()}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestViewerKeyframeRequestReachesStreamer(t *testing.T) {
+	mediaEngine := &webrtc.MediaEngine{}
+	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
+		t.Fatal(err)
+	}
+	srv := testServer()
+	srv.webrtcAPI = webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine))
+
+	// Streamer: publish a video track and keep RTP flowing.
+	streamer, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer streamer.Close()
+	track, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000},
+		"video", "stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamerSender, err := streamer.AddTrack(track)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postSDP(t, streamer, srv.HandleIngestStart, func(r *http.Request) {
+		r.Header.Set("Authorization", "Bearer secret1")
+	})
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for seq := uint16(0); ; seq++ {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				track.WriteRTP(&rtp.Packet{
+					Header: rtp.Header{Version: 2, SequenceNumber: seq,
+						Timestamp: uint32(seq) * 3000},
+					Payload: []byte{0x41, 0x00},
+				})
+			}
+		}
+	}()
+
+	// Wait for the server to register the ingest track.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		srv.mu.RLock()
+		numTracks := len(srv.streams["chan1"].localTracks)
+		srv.mu.RUnlock()
+		if numTracks > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for ingest track")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Viewer: request a keyframe as soon as media arrives.
+	viewer, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer viewer.Close()
+	if _, err := viewer.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo,
+		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly}); err != nil {
+		t.Fatal(err)
+	}
+	viewer.OnTrack(func(remote *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		viewer.WriteRTCP([]rtcp.Packet{
+			&rtcp.PictureLossIndication{MediaSSRC: uint32(remote.SSRC())},
+		})
+	})
+	postSDP(t, viewer, srv.HandleViewerStart, func(r *http.Request) {
+		r.SetPathValue("channelId", "chan1")
+	})
+
+	gotPLI := make(chan struct{})
+	go func() {
+		for {
+			packets, _, err := streamerSender.ReadRTCP()
+			if err != nil {
+				return
+			}
+			for _, p := range packets {
+				if _, ok := p.(*rtcp.PictureLossIndication); ok {
+					close(gotPLI)
+					return
+				}
+			}
+		}
+	}()
+
+	select {
+	case <-gotPLI:
+	case <-time.After(10 * time.Second):
+		t.Fatal("streamer never received the viewer's keyframe request")
 	}
 }

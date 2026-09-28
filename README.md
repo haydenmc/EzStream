@@ -23,7 +23,7 @@ sequenceDiagram
 - **Notifier** handles real-time push notifications to connected browsers over WebSocket when streams go live or offline.
 - **Server** holds all WebRTC state, authenticates ingest requests, and fans out media from one streamer to many viewers using Pion's `TrackLocalStaticRTP`.
 
-Pion's default interceptors (NACK, RTCP reports, TWCC) are enabled along with IntervalPLI for periodic keyframe requests, so new viewers get a clean picture quickly.
+Pion's default interceptors (NACK, RTCP reports, TWCC) are enabled along with IntervalPLI for periodic keyframe requests, so new viewers get a clean picture quickly. Packets lost on the way to a viewer are retransmitted on request, and viewer keyframe requests (PLI/FIR) are forwarded to the streamer, rate-limited per stream.
 
 ## Configuration
 
